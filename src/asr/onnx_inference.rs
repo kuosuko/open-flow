@@ -7,15 +7,15 @@ use ort::{
 use std::path::Path;
 use tracing::info;
 
-/// ONNX 推理引擎
+/// ONNX inference engine
 pub struct OnnxInference {
     session: Session,
 }
 
 impl OnnxInference {
-    /// 加载 ONNX 模型
+    /// Load ONNX model
     pub fn new(model_path: &Path) -> anyhow::Result<Self> {
-        info!("🧠 加载 ONNX 模型: {:?}", model_path);
+        info!("🧠 Loading ONNX model: {:?}", model_path);
 
         let session = Session::builder()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -28,20 +28,20 @@ impl OnnxInference {
             .commit_from_file(model_path)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-        info!("✓ ONNX 模型加载成功");
-        info!("  输入数: {}", session.inputs().len());
-        info!("  输出数: {}", session.outputs().len());
+        info!("✓ ONNX model loaded successfully");
+        info!("  Inputs: {}", session.inputs().len());
+        info!("  Outputs: {}", session.outputs().len());
         for input in session.inputs() {
-            info!("  输入: {} {:?}", input.name(), input.dtype());
+            info!("  Input: {} {:?}", input.name(), input.dtype());
         }
         for output in session.outputs() {
-            info!("  输出: {} {:?}", output.name(), output.dtype());
+            info!("  Output: {} {:?}", output.name(), output.dtype());
         }
 
         Ok(Self { session })
     }
 
-    /// 运行推理，返回 (logits, encoder_out_lens)
+    /// Run inference, returns (logits, encoder_out_lens)
     pub fn infer(
         &mut self,
         features: &Array2<f32>,
@@ -94,15 +94,15 @@ impl OnnxInference {
                 .into_dimensionality::<ndarray::Ix3>()?
                 .index_axis(Axis(0), 0)
                 .to_owned(),
-            ndim => anyhow::bail!("未预期的输出维度: {ndim}"),
+            ndim => anyhow::bail!("Unexpected output dimensions: {ndim}"),
         };
 
         if valid_len < output_2d.nrows() {
             output_2d = output_2d.slice(ndarray::s![0..valid_len, ..]).to_owned();
         }
 
-        // SenseVoice 在 encoder 前拼接了 4 个 embed（language, emotion, event, itn），
-        // 前 4 帧输出对应这些控制 token，CTC 解码应跳过
+        // SenseVoice prepends 4 embeddings before the encoder (language, emotion, event, itn).
+        // The first 4 output frames correspond to these control tokens and should be skipped during CTC decoding
         const SENSEVOICE_CTC_SKIP_FRAMES: usize = 4;
         if output_2d.nrows() > SENSEVOICE_CTC_SKIP_FRAMES {
             output_2d = output_2d

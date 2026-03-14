@@ -28,7 +28,7 @@ fn postprocess_tokens(tokens: Vec<String>) -> String {
         .to_string()
 }
 
-/// CTC 解码器
+/// CTC decoder
 pub struct CTCDecoder {
     #[allow(dead_code)]
     token_to_id: HashMap<String, i32>,
@@ -38,9 +38,9 @@ pub struct CTCDecoder {
 }
 
 impl CTCDecoder {
-    /// 从 tokens.json 文件创建解码器
+    /// Create decoder from tokens.json file
     pub fn from_tokens_file(tokens_path: &std::path::Path) -> anyhow::Result<Self> {
-        info!("📖 加载 tokens 文件: {:?}", tokens_path);
+        info!("📖 Loading tokens file: {:?}", tokens_path);
 
         let content = std::fs::read_to_string(tokens_path)?;
         let tokens: serde_json::Value = serde_json::from_str(&content)?;
@@ -67,7 +67,7 @@ impl CTCDecoder {
         }
 
         if token_to_id.is_empty() {
-            anyhow::bail!("tokens.json 解析失败：既不是 token->id 映射，也不是 token 列表");
+            anyhow::bail!("Failed to parse tokens.json: neither a token->id mapping nor a token list");
         }
 
         let blank_token_id = token_to_id
@@ -77,7 +77,7 @@ impl CTCDecoder {
         let has_explicit_blank = blank_token_id.is_some();
         let blank_id = blank_token_id.unwrap_or(0);
 
-        info!("✓ Tokens 加载完成: {} 个 tokens", token_to_id.len());
+        info!("✓ Tokens loaded: {} tokens", token_to_id.len());
         info!("  Blank ID: {}", blank_id);
 
         Ok(Self {
@@ -88,7 +88,7 @@ impl CTCDecoder {
         })
     }
 
-    /// CTC 贪婪解码。debug 为 true 时打印前几帧的 top-k token
+    /// CTC greedy decoding. When debug is true, prints top-k tokens for the first few frames
     pub fn decode(&self, logits: &Array2<f32>, debug: bool) -> String {
         let num_frames = logits.nrows();
         let num_classes = logits.ncols();
@@ -139,8 +139,8 @@ impl CTCDecoder {
             0
         };
 
-        // 当 blank(含<unk>) 过强时可选用每帧“最佳非 blank”以得到非空结果；设 OPEN_FLOW_BEST_NON_BLANK=0 恢复纯 argmax
-        // 纯 CTC argmax；设 OPEN_FLOW_BEST_NON_BLANK=1 可开启调试模式
+        // When blank (including <unk>) is too dominant, optionally use best non-blank per frame for non-empty results; set OPEN_FLOW_BEST_NON_BLANK=0 to restore pure argmax
+        // Pure CTC argmax; set OPEN_FLOW_BEST_NON_BLANK=1 to enable debug mode
         let use_best_non_blank = std::env::var("OPEN_FLOW_BEST_NON_BLANK").map(|v| v == "1").unwrap_or(false);
 
         let mut prev_id = -1i32;
@@ -180,7 +180,7 @@ impl CTCDecoder {
         postprocess_tokens(result)
     }
 
-    /// 获取 token 数
+    /// Get vocabulary size
     #[allow(dead_code)]
     pub fn vocab_size(&self) -> usize {
         self.token_to_id.len()
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_ctc_decode_simple() {
-        // 创建简单的测试 tokens
+        // Create simple test tokens
         let mut token_to_id = HashMap::new();
         let mut id_to_token = HashMap::new();
 
@@ -212,8 +212,8 @@ mod tests {
             has_explicit_blank: true,
         };
 
-        // 创建模拟的 logits: [frames, classes]
-        // 假设 5 帧，3 个类别（blank=0, a=1, b=2）
+        // Create mock logits: [frames, classes]
+        // Assume 5 frames, 3 classes (blank=0, a=1, b=2)
         let logits = Array2::from_shape_vec(
             (5, 3),
             vec![
@@ -242,7 +242,7 @@ mod tests {
         CTCDecoder { token_to_id, id_to_token, blank_id, has_explicit_blank }
     }
 
-    /// 全 blank → 空字符串
+    /// All blank -> empty string
     #[test]
     fn test_decode_all_blank_returns_empty() {
         let dec = make_decoder(&[("<blank>", 0), ("你", 1), ("好", 2)]);
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(dec.decode(&logits, false), "");
     }
 
-    /// 0 帧 logits → 空字符串，不 panic
+    /// 0-frame logits -> empty string, no panic
     #[test]
     fn test_decode_empty_logits_no_panic() {
         let dec = make_decoder(&[("<blank>", 0), ("a", 1)]);
@@ -261,10 +261,10 @@ mod tests {
         assert_eq!(dec.decode(&logits, false), "");
     }
 
-    /// 特殊 token（<|zh|> 等）不出现在结果中
+    /// Special tokens (<|zh|> etc.) should not appear in results
     #[test]
     fn test_decode_special_tokens_filtered() {
-        // 模拟 SenseVoice 输出中含语言/情感 token
+        // Simulate SenseVoice output containing language/emotion tokens
         let dec = make_decoder(&[
             ("<blank>", 0),
             ("<|zh|>", 1),
@@ -272,7 +272,7 @@ mod tests {
             ("你", 3),
             ("好", 4),
         ]);
-        // 帧序列：lang_tag, emotion_tag, 你, 好
+        // Frame sequence: lang_tag, emotion_tag, 你, 好
         let logits = Array2::from_shape_vec(
             (4, 5),
             vec![
@@ -283,16 +283,16 @@ mod tests {
             ],
         ).unwrap();
         let result = dec.decode(&logits, false);
-        assert!(!result.contains("<|"), "特殊 token 不应出现在结果中，got: {:?}", result);
+        assert!(!result.contains("<|"), "Special tokens should not appear in results, got: {:?}", result);
         assert!(result.contains("你") && result.contains("好"),
-            "正常汉字应出现在结果中，got: {:?}", result);
+            "Normal CJK characters should appear in results, got: {:?}", result);
     }
 
-    /// 连续相同 token 合并（CTC 规则）
+    /// Consecutive identical tokens are collapsed (CTC rule)
     #[test]
     fn test_decode_consecutive_same_token_collapsed() {
         let dec = make_decoder(&[("<blank>", 0), ("a", 1)]);
-        // a a a blank a → "aa"（三个连续 a 合并为 1，blank 后的 a 是新的）
+        // a a a blank a -> "aa" (three consecutive a's collapse to 1, a after blank is new)
         let logits = Array2::from_shape_vec(
             (5, 2),
             vec![
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(dec.decode(&logits, false), "aa");
     }
 
-    /// ▁ 前缀正确转换为空格
+    /// ▁ prefix correctly converted to space
     #[test]
     fn test_decode_triangle_space_prefix() {
         let dec = make_decoder(&[

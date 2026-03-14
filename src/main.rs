@@ -4,11 +4,12 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::info;
 
-// 公共模块来自 lib crate（open_flow）
+// Public modules from lib crate (open_flow)
 use open_flow::asr;
 use open_flow::audio;
 use open_flow::common;
 use open_flow::hotkey;
+use open_flow::overlay;
 use open_flow::text_injection;
 use open_flow::tray;
 
@@ -20,7 +21,7 @@ use cli::commands;
 fn is_app_bundle_launch() -> bool {
     #[cfg(not(target_os = "macos"))]
     {
-        return false; // 仅 macOS 有 .app 包，Windows/Linux 始终走 CLI
+        return false; // Only macOS has .app bundles, Windows/Linux always use CLI
     }
 
     #[cfg(target_os = "macos")]
@@ -66,7 +67,7 @@ fn redirect_app_bundle_stdio_to_log() {
         let _ = libc::dup2(fd, libc::STDERR_FILENO);
     }
 
-    // 保持文件句柄存活到进程结束，避免 stdout/stderr 指向已关闭 fd。
+    // Keep file handle alive until process ends, to avoid stdout/stderr pointing to closed fd.
     std::mem::forget(file);
 }
 
@@ -81,7 +82,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the voice input daemon (默认后台运行；--foreground 时占用终端)
+    /// Start the voice input daemon (runs in background by default; --foreground keeps terminal open)
     Start {
         /// Path to SenseVoice model directory
         #[arg(short, long)]
@@ -92,13 +93,13 @@ enum Commands {
         foreground: bool,
     },
 
-    /// Stop the daemon (停止守护进程)
+    /// Stop the daemon
     Stop,
 
-    /// Check daemon status (查看状态)
+    /// Check daemon status
     Status,
 
-    /// One-shot transcription (单次录音转写)
+    /// One-shot transcription (record and transcribe)
     Transcribe {
         /// Use an existing audio file instead of recording
         #[arg(long)]
@@ -113,14 +114,14 @@ enum Commands {
         model: Option<PathBuf>,
     },
 
-    /// Test audio recording (测试录音)
+    /// Test audio recording
     TestRecord {
         /// Recording duration in seconds
         #[arg(short, long, default_value = "5")]
         duration: u64,
     },
 
-    /// Simulate Command key in loop for hotkey/recording test (需另终端先运行 open-flow start)
+    /// Simulate Command key in loop for hotkey/recording test (requires open-flow start in another terminal)
     TestHotkey {
         /// Number of cycles: press=start, wait, press=stop, wait
         #[arg(short, long, default_value = "3")]
@@ -136,7 +137,7 @@ enum Commands {
         ready_wait_secs: u64,
     },
 
-    /// Manually download the ASR model (手动下载模型，首次运行会自动触发无需手动执行)
+    /// Manually download the ASR model (auto-triggered on first run, manual execution not needed)
     #[command(hide = true)]
     Setup {
         /// Custom model installation directory (default: app data dir)
@@ -149,9 +150,9 @@ enum Commands {
     },
 }
 
-/// `open-flow start` 默认后台；`--foreground` 时走前台路径（主线程保留给 macOS 托盘/NSRunLoop）
+/// `open-flow start` defaults to background; `--foreground` uses foreground path (main thread reserved for macOS tray/NSRunLoop)
 fn main() -> anyhow::Result<()> {
-    // 若为后台子进程，先 detach 再初始化 tracing
+    // If background child process, detach first then initialize tracing
     if std::env::var_os("OPEN_FLOW_DAEMON").is_some() {
         #[cfg(unix)]
         {
@@ -170,8 +171,8 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     log_launch_context(app_bundle_launch);
 
-    // Finder / Dock 双击启动 .app 时不带子命令，直接进入前台模式。
-    // 这样 app bundle 的主可执行文件就是实际运行的进程，避免权限身份漂移。
+    // When launched from Finder / Dock by double-clicking .app, no subcommand is given, go directly to foreground mode.
+    // This way the app bundle's main executable is the actual running process, avoiding permission identity drift.
     if app_bundle_launch {
         info!("Starting Open Flow from app bundle (foreground mode)...");
         return cli::daemon::start_foreground(None);
@@ -189,7 +190,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         other => {
-            // 其他命令用 tokio 运行时
+            // Other commands use tokio runtime
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?

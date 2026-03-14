@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use crate::audio::AudioCapture;
 
-/// 测试录音功能
+/// Test recording functionality
 pub async fn test_record(duration_secs: u64) -> Result<()> {
-    println!("🎙️  测试录音功能");
+    println!("🎙️  Test Recording");
     println!();
 
-    // 显示可用设备
+    // Show available devices
     let host = cpal::default_host();
-    println!("可用的音频输入设备:");
+    println!("Available audio input devices:");
     println!("{}", "=".repeat(50));
     if let Ok(devices) = host.input_devices() {
         for (idx, device) in devices.enumerate() {
@@ -22,68 +22,68 @@ pub async fn test_record(duration_secs: u64) -> Result<()> {
                     .unwrap_or(false);
                 println!("{} [{}] {}", if is_default { "*" } else { " " }, idx, name);
                 if let Ok(cfg) = device.default_input_config() {
-                    println!("    采样率: {}Hz, 通道: {}, 格式: {:?}",
+                    println!("    Sample rate: {}Hz, Channels: {}, Format: {:?}",
                         cfg.sample_rate().0, cfg.channels(), cfg.sample_format());
                 }
             }
         }
     }
     println!("{}", "=".repeat(50));
-    println!("* = 默认设备");
+    println!("* = default device");
     println!();
 
-    // 初始化音频采集器
+    // Initialize audio capture
     let audio_capture = AudioCapture::new()?;
     let info = audio_capture.get_info();
-    println!("使用音频设备配置:");
-    println!("  采样率: {}Hz", info.sample_rate);
-    println!("  通道数: {}", info.channels);
-    println!("  格式: {}", info.sample_format);
+    println!("Audio device configuration:");
+    println!("  Sample rate: {}Hz", info.sample_rate);
+    println!("  Channels: {}", info.channels);
+    println!("  Format: {}", info.sample_format);
     println!();
 
-    // 准备输出路径
+    // Prepare output path
     let temp_dir = std::env::temp_dir();
     let output_path = temp_dir.join("open-flow-test-recording.wav");
     
-    println!("🔴 准备开始录音 {} 秒...", duration_secs);
-    println!("   请准备好说话");
+    println!("🔴 Ready to record for {} seconds...", duration_secs);
+    println!("   Please get ready to speak");
     println!();
-    
-    // 倒计时 3 秒
+
+    // 3-second countdown
     for i in (1..=3).rev() {
-        print!("\r   开始录音倒计时: {}...", i);
+        print!("\r   Recording countdown: {}...", i);
         std::io::Write::flush(&mut std::io::stdout())?;
         std::thread::sleep(Duration::from_secs(1));
     }
-    println!("\r   开始！                    ");
-    
-    // 直接录制到文件
+    println!("\r   Go!                        ");
+
+    // Record directly to file
     match audio_capture.record_to_file(
         Duration::from_secs(duration_secs),
         &output_path,
     ) {
         Ok(_) => {
             println!();
-            println!("✅ 测试完成！");
-            println!("   录音文件: {:?}", output_path);
-            
-            // 检查文件
+            println!("✅ Test complete!");
+            println!("   Recording file: {:?}", output_path);
+
+            // Check file
             if output_path.exists() {
                 let metadata = std::fs::metadata(&output_path)?;
-                println!("   文件大小: {} bytes ({:.2} MB)", 
+                println!("   File size: {} bytes ({:.2} MB)",
                     metadata.len(),
                     metadata.len() as f64 / 1024.0 / 1024.0
                 );
                 
-                // 显示播放命令
+                // Show playback command
                 println!();
-                println!("📢 播放录音:");
+                println!("📢 Play recording:");
                 println!("   open {:?}", output_path);
             }
         }
         Err(e) => {
             println!();
-            println!("❌ 录音失败: {}", e);
+            println!("❌ Recording failed: {}", e);
             return Err(e);
         }
     }

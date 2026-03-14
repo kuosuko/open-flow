@@ -2,7 +2,7 @@ use ndarray::Array2;
 use std::f32::consts::PI;
 use std::path::Path;
 
-/// 音频预处理参数（与 FunASR SenseVoice frontend_conf 对齐）
+/// Audio preprocessing parameters (aligned with FunASR SenseVoice frontend_conf)
 /// config: fs=16000, window=hamming, n_mels=80, frame_length=25, frame_shift=10, lfr_m=7, lfr_n=6
 pub const TARGET_SAMPLE_RATE: u32 = 16000;
 pub const N_MELS: usize = 80;
@@ -11,14 +11,14 @@ pub const FRAME_SHIFT_MS: f32 = 10.0;
 pub const LFR_M: usize = 7;
 pub const LFR_N: usize = 6;
 
-/// FFT 长度：Kaldi 将 frame_length(400) 向上取 2 的幂次 → 512；与 torchaudio.compliance.kaldi.fbank 一致
+/// FFT length: Kaldi rounds frame_length(400) up to next power of 2 -> 512; consistent with torchaudio.compliance.kaldi.fbank
 const N_FFT: usize = 512;
 
-/// 梅尔范围：Kaldi 默认 low=20Hz, high=Nyquist(8000Hz for 16kHz)
+/// Mel range: Kaldi default low=20Hz, high=Nyquist(8000Hz for 16kHz)
 const MEL_FMIN_HZ: f32 = 20.0;
 const MEL_FMAX_HZ: f32 = 8000.0;
 
-/// 音频预处理器
+/// Audio preprocessor
 pub struct AudioPreprocessor {
     #[allow(dead_code)]
     sample_rate: u32,
@@ -31,7 +31,7 @@ pub struct AudioPreprocessor {
 }
 
 impl AudioPreprocessor {
-    /// 创建新的音频预处理器（fbank 参数与 FunASR WavFrontend/Kaldi 对齐）
+    /// Create a new audio preprocessor (fbank params aligned with FunASR WavFrontend/Kaldi)
     pub fn new(sample_rate: u32) -> Self {
         let frame_length = (FRAME_LENGTH_MS / 1000.0 * sample_rate as f32) as usize;
         let hop_length = (FRAME_SHIFT_MS / 1000.0 * sample_rate as f32) as usize;
@@ -54,7 +54,7 @@ impl AudioPreprocessor {
         let (shift, scale) = parse_kaldi_cmvn(path)?;
         if shift.len() != N_MELS * LFR_M || scale.len() != N_MELS * LFR_M {
             anyhow::bail!(
-                "CMVN 维度不匹配: shift={}, scale={}, expected={}",
+                "CMVN dimension mismatch: shift={}, scale={}, expected={}",
                 shift.len(),
                 scale.len(),
                 N_MELS * LFR_M
@@ -65,38 +65,38 @@ impl AudioPreprocessor {
         Ok(())
     }
 
-    /// 处理音频数据
+    /// Process audio data
     pub fn process(&self, audio: &[f32], source_sample_rate: u32) -> anyhow::Result<Array2<f32>> {
-        // 1. 重采样到 16kHz
+        // 1. Resample to 16kHz
         let resampled = if source_sample_rate != TARGET_SAMPLE_RATE {
             resample_audio(audio, source_sample_rate, TARGET_SAMPLE_RATE)?
         } else {
             audio.to_vec()
         };
 
-        // 2. Dither：FunASR WavFrontend 默认 dither=0.0（关闭），设 OPEN_FLOW_DITHER=1 可开启
+        // 2. Dither: FunASR WavFrontend defaults to dither=0.0 (off), set OPEN_FLOW_DITHER=1 to enable
         let dithered = if std::env::var("OPEN_FLOW_DITHER").map(|v| v == "1").unwrap_or(false) {
             add_dither(&resampled, 1.0)
         } else {
             resampled
         };
 
-        // 3. 预加重
+        // 3. Pre-emphasis
         let preemphasized = preemphasis(&dithered, 0.97);
 
-        // 4. 分帧加窗（frame_length=400@16k，hop=160）
+        // 4. Framing and windowing (frame_length=400@16k, hop=160)
         let frames = frame_audio(&preemphasized, self.frame_length, self.hop_length)?;
 
-        // 5. 计算功率谱（n_fft 与 frame_length 一致）
+        // 5. Compute power spectrum (n_fft matches frame_length)
         let power_spec = compute_power_spectrum(&frames, self.n_fft)?;
 
-        // 6. 应用梅尔滤波器
+        // 6. Apply mel filterbank
         let mel_spec = apply_mel_filterbank(&power_spec, &self.mel_filterbank)?;
 
-        // 7. 取对数：与 torchaudio kaldi 一致，floor 用 f32::EPSILON(≈1.19e-7)，log(eps)≈-15.94
+        // 7. Log: consistent with torchaudio kaldi, floor uses f32::EPSILON(~1.19e-7), log(eps)~-15.94
         let log_mel_spec = mel_spec.mapv(|x| x.max(f32::EPSILON).ln());
 
-        // 8. LFR (Low Frame Rate) 处理
+        // 8. LFR (Low Frame Rate) processing
         let mut lfr_features = apply_lfr(&log_mel_spec, LFR_M, LFR_N)?;
 
         if std::env::var("OPEN_FLOW_SKIP_CMVN").is_err() {
@@ -128,9 +128,9 @@ fn parse_kaldi_cmvn(path: &Path) -> anyhow::Result<(Vec<f32>, Vec<f32>)> {
     }
 
     let shift = extract_vec_after(&content, "<AddShift>")
-        .ok_or_else(|| anyhow::anyhow!("无法解析 <AddShift> 向量"))?;
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse <AddShift> vector"))?;
     let scale = extract_vec_after(&content, "<Rescale>")
-        .ok_or_else(|| anyhow::anyhow!("无法解析 <Rescale> 向量"))?;
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse <Rescale> vector"))?;
     Ok((shift, scale))
 }
 
@@ -138,7 +138,7 @@ fn apply_cmvn(features: &mut Array2<f32>, shift: &[f32], scale: &[f32]) -> anyho
     let dim = features.ncols();
     if shift.len() != dim || scale.len() != dim {
         anyhow::bail!(
-            "CMVN 维度不匹配: feat_dim={}, shift={}, scale={}",
+            "CMVN dimension mismatch: feat_dim={}, shift={}, scale={}",
             dim,
             shift.len(),
             scale.len()
@@ -152,7 +152,7 @@ fn apply_cmvn(features: &mut Array2<f32>, shift: &[f32], scale: &[f32]) -> anyho
     Ok(())
 }
 
-/// 重采样音频
+/// Resample audio
 fn resample_audio(audio: &[f32], from_rate: u32, to_rate: u32) -> anyhow::Result<Vec<f32>> {
     if audio.is_empty() {
         return Ok(Vec::new());
@@ -182,14 +182,14 @@ fn resample_audio(audio: &[f32], from_rate: u32, to_rate: u32) -> anyhow::Result
     Ok(out)
 }
 
-/// 简单 LCG 伪随机，用于 dither，避免依赖 rand（便于 Windows 等平台构建）
+/// Simple LCG pseudo-random, used for dither, avoids depending on rand (easier cross-platform builds)
 #[inline]
 fn lcg_next_u32(state: &mut u32) -> u32 {
     *state = state.wrapping_mul(1103515245).wrapping_add(12345);
     *state >> 16
 }
 
-/// Dither：对样本加均匀随机噪声，与 Kaldi/FunASR 一致（scale 约 1.0 对应 ±0.5 量级）
+/// Dither: add uniform random noise to samples, consistent with Kaldi/FunASR (scale ~1.0 corresponds to +/-0.5 magnitude)
 fn add_dither(audio: &[f32], scale: f32) -> Vec<f32> {
     let mut state = 1u32;
     audio
@@ -202,7 +202,7 @@ fn add_dither(audio: &[f32], scale: f32) -> Vec<f32> {
         .collect()
 }
 
-/// 预加重滤波
+/// Pre-emphasis filter
 fn preemphasis(audio: &[f32], coeff: f32) -> Vec<f32> {
     if audio.is_empty() {
         return Vec::new();
@@ -218,7 +218,7 @@ fn preemphasis(audio: &[f32], coeff: f32) -> Vec<f32> {
     result
 }
 
-/// 分帧加窗
+/// Frame and window audio
 fn frame_audio(audio: &[f32], frame_size: usize, hop_length: usize) -> anyhow::Result<Array2<f32>> {
     if audio.len() < frame_size {
         return Ok(Array2::zeros((1, frame_size)));
@@ -227,7 +227,7 @@ fn frame_audio(audio: &[f32], frame_size: usize, hop_length: usize) -> anyhow::R
     let num_frames = (audio.len() - frame_size) / hop_length + 1;
     let mut frames = Array2::zeros((num_frames, frame_size));
 
-    // 汉明窗
+    // Hamming window
     let window: Vec<f32> = (0..frame_size)
         .map(|i| 0.54 - 0.46 * (2.0 * PI * i as f32 / (frame_size - 1) as f32).cos())
         .collect();
@@ -244,7 +244,7 @@ fn frame_audio(audio: &[f32], frame_size: usize, hop_length: usize) -> anyhow::R
     Ok(frames)
 }
 
-/// 计算功率谱
+/// Compute power spectrum
 fn compute_power_spectrum(frames: &Array2<f32>, n_fft: usize) -> anyhow::Result<Array2<f32>> {
     use realfft::RealFftPlanner;
 
@@ -257,7 +257,7 @@ fn compute_power_spectrum(frames: &Array2<f32>, n_fft: usize) -> anyhow::Result<
 
     for (i, frame) in frames.outer_iter().enumerate() {
         let mut input: Vec<f32> = frame.to_vec();
-        input.resize(n_fft, 0.0); // 零填充
+        input.resize(n_fft, 0.0); // zero-pad
         let mut output = fft.make_output_vec();
 
         fft.process(&mut input, &mut output)?;
@@ -270,7 +270,7 @@ fn compute_power_spectrum(frames: &Array2<f32>, n_fft: usize) -> anyhow::Result<
     Ok(power_spec)
 }
 
-/// 创建梅尔滤波器组（与 Kaldi 常用 f_min=20, f_max=7600 对齐）
+/// Create mel filterbank (aligned with Kaldi common f_min=20, f_max=7600)
 fn create_mel_filterbank(
     sample_rate: u32,
     n_fft: usize,
@@ -321,7 +321,7 @@ fn create_mel_filterbank(
     filterbank
 }
 
-/// 应用梅尔滤波器
+/// Apply mel filterbank
 fn apply_mel_filterbank(
     power_spec: &Array2<f32>,
     mel_filterbank: &Array2<f32>,
@@ -345,9 +345,9 @@ fn apply_mel_filterbank(
 }
 
 /// LFR (Low Frame Rate)
-/// 支持两种模式（可通过 OPEN_FLOW_LFR_LEFT_PAD=0 关闭左填充以匹配部分导出）：
-/// - 左填充模式：与 FunASR apply_lfr 一致，左 pad (m-1)/2，窗 [i*n, i*n+m)
-/// - 无左填充：窗 [i*n, i*n+m)，不足右侧用末帧
+/// Supports two modes (disable left padding via OPEN_FLOW_LFR_LEFT_PAD=0 to match some exports):
+/// - Left padding mode: consistent with FunASR apply_lfr, left pad (m-1)/2, window [i*n, i*n+m)
+/// - No left padding: window [i*n, i*n+m), pad right side with last frame if insufficient
 fn apply_lfr(features: &Array2<f32>, m: usize, n: usize) -> anyhow::Result<Array2<f32>> {
     let t = features.nrows();
     let feat_dim = features.ncols();
@@ -396,52 +396,52 @@ mod tests {
         let audio = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let result = preemphasis(&audio, 0.97);
         assert_eq!(result.len(), audio.len());
-        // 第一帧不变
+        // First frame unchanged
         assert!((result[0] - 1.0).abs() < 1e-6);
-        // 第二帧 = 2.0 - 0.97 * 1.0 = 1.03
+        // Second frame = 2.0 - 0.97 * 1.0 = 1.03
         assert!((result[1] - 1.03f32).abs() < 1e-5);
     }
 
-    /// 重采样后样本数与时长一致
+    /// Resampled sample count matches duration
     #[test]
     fn test_resample_preserves_duration() {
         let from_rate = 48000u32;
         let to_rate = TARGET_SAMPLE_RATE; // 16000
-        let n_input = 48000usize; // 1秒
+        let n_input = 48000usize; // 1 second
         let audio: Vec<f32> = (0..n_input).map(|i| (i as f32 / n_input as f32).sin()).collect();
 
         let output = resample_audio(&audio, from_rate, to_rate).unwrap();
         let expected = (n_input as f64 * to_rate as f64 / from_rate as f64).round() as usize;
         assert_eq!(output.len(), expected,
-            "重采样后样本数应为 {}，got {}", expected, output.len());
+            "Resampled sample count should be {}, got {}", expected, output.len());
     }
 
-    /// 重采样 48kHz 2.6s → 16kHz，样本数在合理范围
+    /// Resample 48kHz 2.6s -> 16kHz, sample count within reasonable range
     #[test]
     fn test_resample_48k_2_6s_to_16k() {
         let from_rate = 48000u32;
         let to_rate = TARGET_SAMPLE_RATE;
-        let samples_48k = 126976usize; // 实测日志值
+        let samples_48k = 126976usize; // actual logged value
         let audio = vec![0.1f32; samples_48k];
 
         let output = resample_audio(&audio, from_rate, to_rate).unwrap();
-        // 期望 ~42325 样本（2.64s * 16000）
+        // Expected ~42325 samples (2.64s * 16000)
         assert!(output.len() > 40000 && output.len() < 45000,
-            "16kHz 重采样结果应在 40000~45000 范围，got {}", output.len());
+            "16kHz resampled result should be in 40000~45000 range, got {}", output.len());
     }
 
-    /// 空音频重采样不 panic，返回空
+    /// Empty audio resampling should not panic, returns empty
     #[test]
     fn test_resample_empty_audio() {
         let result = resample_audio(&[], 48000, TARGET_SAMPLE_RATE).unwrap();
-        assert!(result.is_empty(), "空音频重采样应返回空 Vec");
+        assert!(result.is_empty(), "Empty audio resampling should return empty Vec");
     }
 
-    /// 分帧数量计算正确
+    /// Frame count calculation is correct
     #[test]
     fn test_frame_count_calculation() {
         let sample_rate = TARGET_SAMPLE_RATE as usize; // 16000
-        let duration_samples = sample_rate * 2; // 2秒
+        let duration_samples = sample_rate * 2; // 2 seconds
         let audio: Vec<f32> = vec![0.0; duration_samples];
 
         let frame_size = (FRAME_LENGTH_MS / 1000.0 * TARGET_SAMPLE_RATE as f32) as usize; // 400
@@ -450,69 +450,69 @@ mod tests {
         let frames = frame_audio(&audio, frame_size, hop).unwrap();
         let expected = (duration_samples - frame_size) / hop + 1;
         assert_eq!(frames.nrows(), expected,
-            "分帧数应为 {}，got {}", expected, frames.nrows());
+            "Frame count should be {}, got {}", expected, frames.nrows());
     }
 
-    /// LFR 输出帧数 < 输入帧数（n=6 下采样）
+    /// LFR output frame count < input frame count (n=6 downsampling)
     #[test]
     fn test_lfr_reduces_frame_count() {
-        let t = 200usize; // 200 输入帧
+        let t = 200usize; // 200 input frames
         let feat_dim = N_MELS;
         let input = ndarray::Array2::zeros((t, feat_dim));
 
         let lfr = apply_lfr(&input, LFR_M, LFR_N).unwrap();
-        // 输出帧数 ≈ t/n（含左填充）
+        // Output frame count ~ t/n (including left padding)
         let left_pad = (LFR_M - 1) / 2;
         let expected = (t + left_pad + LFR_N - 1) / LFR_N;
         assert_eq!(lfr.nrows(), expected,
-            "LFR 输出帧数应为 {}，got {}", expected, lfr.nrows());
+            "LFR output frame count should be {}, got {}", expected, lfr.nrows());
         assert_eq!(lfr.ncols(), N_MELS * LFR_M,
-            "LFR 特征维度应为 {}，got {}", N_MELS * LFR_M, lfr.ncols());
-        assert!(lfr.nrows() < t, "LFR 应减少帧数");
+            "LFR feature dimension should be {}, got {}", N_MELS * LFR_M, lfr.ncols());
+        assert!(lfr.nrows() < t, "LFR should reduce frame count");
     }
 
-    /// CMVN 维度匹配时正常处理，不匹配时报错
+    /// CMVN processes normally when dimensions match, errors when mismatched
     #[test]
     fn test_cmvn_dimension_check() {
         let dim = N_MELS * LFR_M; // 560
         let mut features = ndarray::Array2::zeros((10, dim));
 
-        // 正确维度
+        // Correct dimensions
         let shift = vec![0.0f32; dim];
         let scale = vec![1.0f32; dim];
         assert!(apply_cmvn(&mut features, &shift, &scale).is_ok());
 
-        // 维度不匹配
+        // Dimension mismatch
         let bad_shift = vec![0.0f32; 100];
         let bad_scale = vec![1.0f32; 100];
         assert!(apply_cmvn(&mut features, &bad_shift, &bad_scale).is_err(),
-            "CMVN 维度不匹配应返回 Err");
+            "CMVN dimension mismatch should return Err");
     }
 
-    /// 全零样本经过预处理管线不 panic
+    /// All-zero samples through preprocessing pipeline should not panic
     #[test]
     fn test_preprocessor_silent_audio_no_panic() {
         let pre = AudioPreprocessor::new(TARGET_SAMPLE_RATE);
-        // 3秒全零 16kHz（模拟静音）
+        // 3 seconds of all-zero 16kHz (simulating silence)
         let silent = vec![0.0f32; TARGET_SAMPLE_RATE as usize * 3];
         let result = pre.process(&silent, TARGET_SAMPLE_RATE);
-        assert!(result.is_ok(), "全零样本预处理不应 panic，got: {:?}", result.err());
+        assert!(result.is_ok(), "All-zero sample preprocessing should not panic, got: {:?}", result.err());
     }
 
-    /// 48kHz 音频输入自动重采样到 16kHz
+    /// 48kHz audio input automatically resampled to 16kHz
     #[test]
     fn test_preprocessor_resamples_48k_input() {
         let pre = AudioPreprocessor::new(TARGET_SAMPLE_RATE);
-        // 1秒 48kHz 正弦波
+        // 1 second 48kHz sine wave
         use std::f32::consts::PI;
         let audio: Vec<f32> = (0..48000)
             .map(|i| (2.0 * PI * 440.0 * i as f32 / 48000.0).sin() * 0.1)
             .collect();
         let result = pre.process(&audio, 48000);
-        assert!(result.is_ok(), "48kHz 音频预处理不应失败，got: {:?}", result.err());
+        assert!(result.is_ok(), "48kHz audio preprocessing should not fail, got: {:?}", result.err());
         let features = result.unwrap();
-        // 特征维度应为 N_MELS * LFR_M = 560
+        // Feature dimension should be N_MELS * LFR_M = 560
         assert_eq!(features.ncols(), N_MELS * LFR_M);
-        assert!(features.nrows() > 0, "特征帧数应 > 0");
+        assert!(features.nrows() > 0, "Feature frame count should be > 0");
     }
 }
