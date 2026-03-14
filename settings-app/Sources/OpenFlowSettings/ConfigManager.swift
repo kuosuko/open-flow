@@ -193,6 +193,7 @@ class ConfigManager: ObservableObject {
             ("typing_delay_ms", String(typingDelayMs)),
         ]
 
+        let numericKeys: Set<String> = ["typing_chunk_size", "typing_delay_ms"]
         let ourKeys = Set(ourValues.map { $0.0 })
         var outputLines: [String] = []
 
@@ -200,7 +201,11 @@ class ConfigManager: ObservableObject {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if let (key, _) = parseTOMLLine(trimmed), ourKeys.contains(key) {
                 if let val = ourValues.first(where: { $0.0 == key }) {
-                    outputLines.append("\(key) = \"\(val.1)\"")
+                    if numericKeys.contains(key) {
+                        outputLines.append("\(key) = \(val.1)")
+                    } else {
+                        outputLines.append("\(key) = \"\(val.1)\"")
+                    }
                     knownKeys.insert(key)
                 }
             } else {
@@ -209,7 +214,11 @@ class ConfigManager: ObservableObject {
         }
 
         for (key, value) in ourValues where !knownKeys.contains(key) {
-            outputLines.append("\(key) = \"\(value)\"")
+            if numericKeys.contains(key) {
+                outputLines.append("\(key) = \(value)")
+            } else {
+                outputLines.append("\(key) = \"\(value)\"")
+            }
         }
 
         while outputLines.last?.trimmingCharacters(in: .whitespaces).isEmpty == true {
