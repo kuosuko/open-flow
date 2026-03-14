@@ -5,15 +5,17 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::asr::groq::GroqAsrProvider;
+use crate::asr::{AsrProvider, LocalAsrProvider};
 use crate::common::config::Config;
 use crate::daemon::run_daemon;
 use crate::tray::{TrayIconState, TrayState};
 
-/// SIGTERM/SIGINT 收到后设为 true，由主循环检测后正常退出
+/// Set to true when SIGTERM/SIGINT is received, main loop checks and exits gracefully
 static SIGNAL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 公共路径辅助
+// Common path helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn pid_path() -> Result<PathBuf> {
@@ -24,18 +26,29 @@ fn log_path() -> Result<PathBuf> {
     Ok(Config::data_dir()?.join("daemon.log"))
 }
 
-/// 读 PID 文件，返回 pid（文件不存在或内容非法返回 None）
+/// Read PID file, return pid (returns None if file doesn't exist or content is invalid)
 fn read_pid() -> Option<u32> {
     let path = pid_path().ok()?;
     let s = fs::read_to_string(path).ok()?;
     s.trim().parse::<u32>().ok()
 }
 
-/// 探测进程是否存在（Unix: kill(pid,0)；Windows: OpenProcess + GetExitCodeProcess）
+/// Check if process exists (Unix: kill(pid,0); Windows: OpenProcess + GetExitCodeProcess)
 fn is_running(pid: u32) -> bool {
     #[cfg(unix)]
     {
-        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+            return false;
+        }
+        // Verify it's actually an open-flow process, not a recycled PID
+        if let Ok(output) = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        {
+            let comm = String::from_utf8_lossy(&output.stdout);
+            return comm.trim().contains("open-flow");
+        }
+        true // if ps fails, assume it's ours
     }
     #[cfg(windows)]
     {
@@ -55,7 +68,7 @@ fn is_running(pid: u32) -> bool {
     }
 }
 
-/// 删除 PID 文件（忽略错误）
+/// Delete PID file (ignore errors)
 fn remove_pid_file() {
     if let Ok(p) = pid_path() {
         let _ = fs::remove_file(p);
@@ -63,21 +76,21 @@ fn remove_pid_file() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// start：默认后台 / 可选前台
+// start: background by default / optional foreground
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 后台启动：spawn 子进程运行 daemon，父进程立即退出；关掉终端不影响子进程。
+/// Background start: spawn child process to run daemon, parent exits immediately; closing terminal doesn't affect child.
 pub fn start_background(model: Option<PathBuf>) -> anyhow::Result<()> {
     if let Some(pid) = read_pid() {
         if is_running(pid) {
-            println!("ℹ️  Open Flow 已在运行 (PID: {})", pid);
-            println!("   停止: open-flow stop");
+            println!("ℹ️  Open Flow is already running (PID: {})", pid);
+            println!("   Stop: open-flow stop");
             return Ok(());
         }
         remove_pid_file();
     }
 
-    let exe = std::env::current_exe().context("无法获取可执行文件路径")?;
+    let exe = std::env::current_exe().context("Cannot get executable path")?;
     let log = log_path()?;
     fs::create_dir_all(log.parent().unwrap())?;
 
@@ -91,7 +104,7 @@ pub fn start_background(model: Option<PathBuf>) -> anyhow::Result<()> {
         .create(true)
         .append(true)
         .open(&log)
-        .context("无法打开日志文件")?;
+        .context("Cannot open log file")?;
 
     let child = Command::new(&exe)
         .args(&args)
@@ -100,97 +113,136 @@ pub fn start_background(model: Option<PathBuf>) -> anyhow::Result<()> {
         .stdout(Stdio::from(log_file.try_clone()?))
         .stderr(Stdio::from(log_file))
         .spawn()
-        .context("启动后台进程失败")?;
+        .context("Failed to start background process")?;
 
     let pid = child.id();
-    // 父进程立即写 PID 文件，stop 命令无需等子进程就绪
-    fs::write(pid_path()?, pid.to_string()).context("写入 PID 文件失败")?;
+    // Parent writes PID file immediately so stop command doesn't need to wait for child readiness
+    fs::write(pid_path()?, pid.to_string()).context("Failed to write PID file")?;
 
-    println!("✅ Open Flow 已在后台启动 (PID: {})", pid);
-    println!("   日志: {}", log.display());
-    println!("   停止: open-flow stop");
+    println!("✅ Open Flow started in background (PID: {})", pid);
+    println!("   Log: {}", log.display());
+    println!("   Stop: open-flow stop");
     Ok(())
 }
 
-/// 前台启动：终端被占用，Ctrl+C 或托盘「退出」可停止。
-/// 主线程驱动 macOS NSRunLoop（托盘事件），tokio 跑背景线程（录音/转写/热键）。
+/// Foreground start: terminal is occupied, Ctrl+C or tray "Exit" to stop.
+/// Main thread drives macOS NSRunLoop (tray events), tokio runs background thread (recording/transcription/hotkey).
 pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
-    // ── 检查是否已在运行 ─────────────────────────────────────────────────
+    // ── Check if already running ─────────────────────────────────────────────────
     if let Some(pid) = read_pid() {
         if is_running(pid) {
-            println!("ℹ️  Open Flow 已在运行 (PID: {})", pid);
-            println!("   停止: open-flow stop");
+            println!("ℹ️  Open Flow is already running (PID: {})", pid);
+            println!("   Stop: open-flow stop");
             return Ok(());
         }
         remove_pid_file();
     }
 
-    // ── 临时 tokio 运行时（仅用于模型下载）────────────────────────────
+    // ── Temporary tokio runtime (only for model download) ────────────────────────────
     let rt_temp = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .context("无法创建 tokio 运行时")?;
+        .context("Cannot create tokio runtime")?;
 
-    // ── 模型就绪（首次自动下载，异步，用 block_on 执行）──────────────
+    // ── Model readiness (auto-download on first run, async, executed with block_on) ──────────────
     let model_path = rt_temp
         .block_on(crate::cli::commands::setup::ensure_model_ready(model))
         .map_err(|e| {
-            eprintln!("❌ 模型准备失败: {}", e);
+            eprintln!("❌ Model preparation failed: {}", e);
             e
         })?;
 
-    // ── 持久化模型路径到配置文件（方便 status 命令展示）─────────────
+    // ── Persist model path to config file (for status command display) ─────────────
     if let Ok(mut config) = Config::load() {
         config.model_path = Some(model_path.clone());
         let _ = config.save();
     }
 
-    // ── 写 PID 文件（直接调用 --foreground 时写；后台启动时父进程已写）────
+    // ── Write PID file (written when calling --foreground directly; parent already wrote for background start) ────
     let my_pid = std::process::id();
     let _ = fs::write(pid_path()?, my_pid.to_string());
 
-    // ── 注册 Ctrl+C / 信号处理 → 设置 flag，由主循环正常退出 ─────────────────
-    // 使用 ctrlc 跨平台（Unix: SIGINT/SIGTERM；Windows: SetConsoleCtrlHandler）
+    // ── Register Ctrl+C / signal handling -> set flag, main loop exits gracefully ─────────────────
+    // Using ctrlc for cross-platform support (Unix: SIGINT/SIGTERM; Windows: SetConsoleCtrlHandler)
     let _ = ctrlc::set_handler(move || {
         SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
     });
 
-    // ── 先初始化 AppKit / NSApplication，再创建托盘 ────────────────────
-    // tray-icon 在 macOS 上要求主线程事件循环已开始处理事件后再创建 TrayIcon，
-    // 否则状态图标可能根本不显示。
+    // ── Initialize AppKit / NSApplication first, then create tray ────────────────────
+    // tray-icon on macOS requires the main thread event loop to have started processing events before creating TrayIcon,
+    // otherwise the status icon may not display at all.
     #[cfg(target_os = "macos")]
     {
         prepare_appkit();
         pump_run_loop_100ms();
     }
 
-    // ── 在主线程创建托盘（macOS 要求 NSStatusItem 在主线程创建；其他平台为 stub）──────
-    let (mut tray, tray_handle) = match TrayState::new() {
+    // ── Create tray on main thread (macOS requires NSStatusItem on main thread; other platforms are stubs) ──────
+    let (mut tray, mut tray_handle_raw) = match TrayState::new() {
         Ok((t, h)) => {
             t.set_state(TrayIconState::Idle);
-            tracing::info!("✅ 托盘图标已创建");
-            (Some(t), Some(Arc::new(h)))
+            tracing::info!("✅ Tray icon created");
+            (Some(t), Some(h))
         }
         Err(e) => {
-            tracing::warn!("托盘图标创建失败: {}，继续运行（无托盘）", e);
+            tracing::warn!("Tray icon creation failed: {}, continuing without tray", e);
             (None, None)
         }
     };
 
-    // ── 在专用线程运行 daemon（current_thread 运行时，Daemon 含 cpal::Stream 非 Send）
+    // ── Create floating indicator (overlay) ──────────────────────────────────────
+    use crate::overlay::OverlayWindow;
+    let overlay = OverlayWindow::new();
+    let (overlay_tx, overlay_rx) = std::sync::mpsc::sync_channel::<TrayIconState>(16);
+    // Set overlay sender before wrapping in Arc
+    if let Some(ref mut handle) = tray_handle_raw {
+        handle.set_overlay_sender(overlay_tx);
+    }
+    let tray_handle = tray_handle_raw.map(Arc::new);
+    if overlay.is_some() {
+        tracing::info!("✅ Overlay window created");
+    }
+
+    // ── Settings app path (bundled alongside main binary) ──────────
+    let settings_app_path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("OpenFlowSettings")))
+        .filter(|p| p.exists());
+
+    // ── Build ASR provider ──────────────────────────────────────────
+    let config = Config::load().unwrap_or_default();
+    let provider: Arc<dyn AsrProvider> = match config.provider.as_str() {
+        "groq" => {
+            let api_key = config.resolved_groq_api_key();
+            match GroqAsrProvider::new(api_key, config.groq_model.clone(), config.groq_language.clone()) {
+                Ok(p) => {
+                    println!("   Provider: Groq ({})", config.groq_model);
+                    Arc::new(p)
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Groq provider failed: {}. Falling back to local.", e);
+                    Arc::new(LocalAsrProvider::new(model_path.clone()))
+                }
+            }
+        }
+        _ => {
+            println!("   Provider: Local (SenseVoice)");
+            Arc::new(LocalAsrProvider::new(model_path.clone()))
+        }
+    };
+
+    // ── Run daemon on dedicated thread (current_thread runtime, Daemon contains cpal::Stream which is not Send)
     let log = log_path()?;
-    println!("✅ Open Flow 已启动 (PID: {})", my_pid);
-    println!("   模型: {:?}", model_path);
-    #[cfg(target_os = "macos")]
-    println!("   热键: 右 Command（固定）");
-    #[cfg(target_os = "windows")]
-    println!("   热键: 右侧 Win 键（固定）");
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    println!("   热键: 右 Meta/Super（固定）");
-    println!("   日志: {}", log.display());
+    println!("✅ Open Flow started (PID: {})", my_pid);
+    println!("   Hotkey: {}", config.hotkey);
+    println!("   Trigger: {}", config.trigger_mode);
+    println!("   Log: {}", log.display());
     println!();
-    println!("   按 Ctrl+C 或托盘菜单「退出」可停止");
-    println!("   ⏳ 模型加载与预热约需 3-5 秒，完成后热键即可使用");
+    println!("   Press Ctrl+C or tray menu \"Exit\" to stop");
+    println!("   ⏳ Model loading and warmup takes ~3-5 seconds, hotkey will be available after completion");
+
+    let daemon_alive = Arc::new(AtomicBool::new(true));
+    let daemon_alive_clone = daemon_alive.clone();
 
     let daemon_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -198,16 +250,17 @@ pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
             .build()
             .expect("daemon tokio runtime");
         rt.block_on(async {
-            if let Err(e) = run_daemon(model_path, tray_handle).await {
-                eprintln!("Daemon 错误: {}", e);
+            if let Err(e) = run_daemon(provider, tray_handle).await {
+                eprintln!("Daemon error: {}", e);
             }
         });
+        daemon_alive_clone.store(false, Ordering::SeqCst);
     });
 
-    // ── 主线程：驱动 macOS NSRunLoop，让托盘 / 菜单事件得以分发 ──────
-    run_main_loop(tray.as_ref());
+    // ── Main thread: drive macOS NSRunLoop to dispatch tray / menu events ──────
+    run_main_loop(tray.as_ref(), overlay.as_ref(), &overlay_rx, settings_app_path.as_deref(), &daemon_alive);
 
-    // ── 退出前显式隐藏菜单栏图标并 pump run loop，避免图标残留
+    // ── Explicitly hide menu bar icon and pump run loop before exit, to avoid icon remnants
     if let Some(ref t) = tray {
         t.hide_from_menu_bar();
     }
@@ -217,46 +270,85 @@ pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
         pump_run_loop_100ms();
     }
 
-    // ── 退出清理 ──────────────────────────────────────────────────────
+    // ── Exit cleanup ──────────────────────────────────────────────────────
     remove_pid_file();
-    let _ = daemon_handle.join();
-    println!("\n👋 Open Flow 已停止");
-    Ok(())
+
+    // Give the daemon thread a short time to exit gracefully
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if daemon_handle.is_finished() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    println!("\n👋 Open Flow stopped");
+
+    // Force exit — the daemon thread may be blocked on tokio recv() or CFRunLoop
+    // and we don't want the process to hang
+    std::process::exit(0);
 }
 
-/// macOS 主循环：每 100ms 执行一次 NSRunLoop，检查是否需要退出。
-/// 这是让 tray-icon 在 macOS 上正常渲染和响应菜单的关键。
-fn run_main_loop(tray: Option<&TrayState>) {
+/// macOS main loop: run NSRunLoop every 100ms, check if exit is needed.
+/// This is key to making tray-icon render and respond to menus properly on macOS.
+fn run_main_loop(
+    tray: Option<&TrayState>,
+    overlay: Option<&crate::overlay::OverlayWindow>,
+    overlay_rx: &std::sync::mpsc::Receiver<TrayIconState>,
+    settings_app_path: Option<&std::path::Path>,
+    daemon_alive: &AtomicBool,
+) {
     loop {
-        // 应用 daemon 发来的托盘状态更新（灰/红/黄）
+        // Apply tray state updates from daemon (gray/red/yellow)
         if let Some(t) = tray {
             t.flush_state_updates();
             t.flush_menu_events();
         }
 
-        // 驱动 macOS NSRunLoop 100ms（分发菜单/托盘事件到回调）
+        // Apply overlay state updates
+        while let Ok(state) = overlay_rx.try_recv() {
+            if let Some(o) = overlay {
+                o.update_state(state);
+            }
+        }
+
+        // Drive macOS NSRunLoop for 100ms (dispatch menu/tray events to callbacks)
         #[cfg(target_os = "macos")]
         pump_run_loop_100ms();
 
         #[cfg(not(target_os = "macos"))]
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // 托盘菜单「退出」
+        // Tray menu "Preferences..." -> launch SwiftUI settings app
+        if tray.map_or(false, |t| t.prefs_requested()) {
+            if let Some(path) = settings_app_path {
+                let _ = std::process::Command::new(path).spawn();
+            } else {
+                tracing::warn!("Settings app not found alongside binary");
+            }
+        }
+
+        // Tray menu "Exit"
         if tray.map_or(false, |t| t.exit_requested()) {
-            tracing::info!("用户点击托盘退出");
+            tracing::info!("User clicked tray exit");
             break;
         }
-        // SIGTERM / SIGINT（open-flow stop 或 Ctrl+C）
+        // SIGTERM / SIGINT (open-flow stop or Ctrl+C)
         if SIGNAL_SHUTDOWN.load(Ordering::SeqCst) {
-            tracing::info!("收到信号，正常退出");
+            tracing::info!("Signal received, exiting gracefully");
+            break;
+        }
+        // Daemon thread exited unexpectedly
+        if !daemon_alive.load(Ordering::SeqCst) {
+            tracing::error!("Daemon thread has exited unexpectedly");
             break;
         }
     }
 }
 
-/// 通过 `[NSApp nextEventMatchingMask:...]` 驱动 AppKit 事件队列。
-/// NSRunLoop::runUntilDate 只处理 run loop sources，无法分发托盘点击事件；
-/// 必须走 NSApplication 的事件队列才能响应 NSStatusItem 点击和菜单。
+/// Drive the AppKit event queue via `[NSApp nextEventMatchingMask:...]`.
+/// NSRunLoop::runUntilDate only handles run loop sources, cannot dispatch tray click events;
+/// must go through NSApplication's event queue to respond to NSStatusItem clicks and menus.
 #[cfg(target_os = "macos")]
 fn prepare_appkit() {
     use objc::{class, msg_send, sel, sel_impl};
@@ -267,8 +359,8 @@ fn prepare_appkit() {
 
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| {
-            // NSApplicationActivationPolicyRegular = 0
-            let _: () = msg_send![app, setActivationPolicy: 0i64];
+            // NSApplicationActivationPolicyAccessory = 1 (no dock icon, but can have windows)
+            let _: () = msg_send![app, setActivationPolicy: 1i64];
             let _: () = msg_send![app, finishLaunching];
         });
     }
@@ -292,7 +384,7 @@ fn pump_run_loop_100ms() {
                 as *const std::os::raw::c_char
         ];
 
-        // 第一次调用最多等 100ms；之后排空剩余事件（distantPast = 不阻塞）
+        // First call waits up to 100ms; then drain remaining events (distantPast = non-blocking)
         let deadline: *mut Object =
             msg_send![date_cls, dateWithTimeIntervalSinceNow: 0.1f64];
         let past: *mut Object = msg_send![date_cls, distantPast];
@@ -326,18 +418,18 @@ pub async fn stop() -> Result<()> {
     let pid = match read_pid() {
         Some(p) => p,
         None => {
-            println!("ℹ️  daemon 未运行（找不到 PID 文件）");
+            println!("ℹ️  Daemon is not running (PID file not found)");
             return Ok(());
         }
     };
 
     if !is_running(pid) {
-        println!("ℹ️  daemon 未运行（PID {} 不存在）", pid);
+        println!("ℹ️  Daemon is not running (PID {} does not exist)", pid);
         remove_pid_file();
         return Ok(());
     }
 
-    println!("⏹️  正在停止 daemon (PID: {})...", pid);
+    println!("⏹️  Stopping daemon (PID: {})...", pid);
 
     #[cfg(unix)]
     {
@@ -346,11 +438,14 @@ pub async fn stop() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if !is_running(pid) {
                 remove_pid_file();
-                println!("✅ daemon 已停止");
+                println!("✅ Daemon stopped");
                 return Ok(());
             }
         }
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        remove_pid_file();
+        println!("✅ Daemon killed (forced)");
     }
 
     #[cfg(windows)]
@@ -365,7 +460,7 @@ pub async fn stop() -> Result<()> {
             }
         }
         remove_pid_file();
-        println!("✅ daemon 已停止");
+        println!("✅ Daemon stopped");
     }
 
     Ok(())
@@ -381,34 +476,31 @@ pub async fn status() -> Result<()> {
     match read_pid() {
         Some(pid) if is_running(pid) => {
             let uptime = get_uptime_str(pid);
-            println!("Open Flow daemon 状态");
-            println!("  状态:   ✅ 运行中");
-            println!("  PID:    {}", pid);
-            println!("  运行:   {}", uptime);
-            println!("  模型:   {:?}", config.model_path.unwrap_or_default());
-            #[cfg(target_os = "macos")]
-            println!("  热键:   右 Command（固定）");
-            #[cfg(target_os = "windows")]
-            println!("  热键:   右侧 Win 键（固定）");
-            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-            println!("  热键:   右 Meta/Super（固定）");
-            println!("  日志:   {}", log_path()?.display());
+            println!("Open Flow daemon status");
+            println!("  Status:   ✅ Running");
+            println!("  PID:      {}", pid);
+            println!("  Uptime:   {}", uptime);
+            println!("  Model:    {:?}", config.model_path.unwrap_or_default());
+            println!("  Provider: {}", config.provider);
+            println!("  Hotkey:   {}", config.hotkey);
+            println!("  Trigger:  {}", config.trigger_mode);
+            println!("  Log:      {}", log_path()?.display());
         }
         Some(pid) => {
-            println!("Open Flow daemon 状态");
-            println!("  状态:   ❌ 未运行（PID {} 已失效）", pid);
+            println!("Open Flow daemon status");
+            println!("  Status: ❌ Not running (PID {} is stale)", pid);
             remove_pid_file();
         }
         None => {
-            println!("Open Flow daemon 状态");
-            println!("  状态:   ❌ 未运行");
-            println!("  启动:   open-flow start");
+            println!("Open Flow daemon status");
+            println!("  Status: ❌ Not running");
+            println!("  Start:  open-flow start");
         }
     }
     Ok(())
 }
 
-/// 用 ps 获取进程启动时间（仅用于展示；Windows 返回 N/A）
+/// Get process start time via ps (display only; Windows returns N/A)
 fn get_uptime_str(pid: u32) -> String {
     #[cfg(unix)]
     {
@@ -417,7 +509,7 @@ fn get_uptime_str(pid: u32) -> String {
             .output();
         match out {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => "未知".to_string(),
+            _ => "unknown".to_string(),
         }
     }
     #[cfg(windows)]

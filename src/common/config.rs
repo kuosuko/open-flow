@@ -10,17 +10,63 @@ const CONFIG_FILE: &str = "config.toml";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model_path: Option<PathBuf>,
+    /// "local" or "groq"
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// Groq API key (env var GROQ_API_KEY takes precedence)
+    #[serde(default)]
+    pub groq_api_key: String,
+    /// Groq Whisper model name
+    #[serde(default = "default_groq_model")]
+    pub groq_model: String,
+    /// Optional language hint for Groq (e.g. "en", "zh"). Empty = auto-detect.
+    #[serde(default)]
+    pub groq_language: String,
+    /// Hotkey identifier: "right_cmd", "fn", "f13", etc.
+    #[serde(default = "default_hotkey")]
+    pub hotkey: String,
+    /// Trigger mode: "toggle" or "hold"
+    #[serde(default = "default_trigger_mode")]
+    pub trigger_mode: String,
+    /// Convert simplified Chinese to traditional: "none", "s2t" (simplified→traditional), "t2s" (traditional→simplified)
+    #[serde(default)]
+    pub chinese_conversion: String,
+}
+
+fn default_provider() -> String {
+    "local".into()
+}
+fn default_groq_model() -> String {
+    "whisper-large-v3-turbo".into()
+}
+fn default_hotkey() -> String {
+    "right_cmd".into()
+}
+fn default_trigger_mode() -> String {
+    "toggle".into()
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             model_path: None,
+            provider: default_provider(),
+            groq_api_key: String::new(),
+            groq_model: default_groq_model(),
+            groq_language: String::new(),
+            hotkey: default_hotkey(),
+            trigger_mode: default_trigger_mode(),
+            chinese_conversion: String::new(),
         }
     }
 }
 
 impl Config {
+    /// Returns Groq API key: env var GROQ_API_KEY takes precedence over config file.
+    pub fn resolved_groq_api_key(&self) -> String {
+        std::env::var("GROQ_API_KEY").unwrap_or_else(|_| self.groq_api_key.clone())
+    }
+
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
 
@@ -34,7 +80,7 @@ impl Config {
         let content = fs::read_to_string(&config_path)?;
         let mut config: Config = toml::from_str(&content)?;
 
-        // 迁移：移除 Shandianshuo 等第三方路径，仅使用 open-flow 自己的目录
+        // Migration: remove third-party paths like Shandianshuo, only use open-flow's own directory
         if let Some(ref p) = config.model_path {
             let s = p.to_string_lossy();
             if s.contains("Shandianshuo") || s.contains("shandianshuo") {
@@ -43,13 +89,19 @@ impl Config {
             }
         }
 
+        if config.model_path.as_ref().map_or(false, |p| p.as_os_str().is_empty()) {
+            config.model_path = None;
+        }
+
         Ok(config)
     }
 
     pub fn save(&self) -> Result<()> {
         let config_path = Self::config_path()?;
         let content = toml::to_string_pretty(self)?;
-        fs::write(config_path, content)?;
+        let tmp = config_path.with_extension("toml.tmp");
+        fs::write(&tmp, &content)?;
+        fs::rename(&tmp, &config_path)?;
         Ok(())
     }
 

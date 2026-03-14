@@ -6,50 +6,53 @@ use tracing::{error, info, warn};
 
 use crate::common::types::HotkeyEvent;
 
-/// 热键监听器，通过 rdev（底层 CGEventTap）监听全局按键事件
+/// Hotkey listener, monitors global key events via CGEventTap (macOS) or rdev (other platforms)
 pub struct HotkeyListener {
     sender: Sender<HotkeyEvent>,
+    hotkey: String,
 }
 
 impl HotkeyListener {
-    pub fn new(sender: Sender<HotkeyEvent>) -> Self {
-        Self { sender }
+    pub fn new(sender: Sender<HotkeyEvent>, hotkey: String) -> Self {
+        Self { sender, hotkey }
     }
 
-    /// 在独立线程启动热键监听
+    /// Start hotkey listener on a dedicated thread
     pub fn start(self) -> Result<()> {
-        info!("正在启动热键监听器（右侧 Command 键，基于 CGEventTap）...");
+        info!("Starting hotkey listener (key: {})...", self.hotkey);
 
+        let hotkey = self.hotkey.clone();
         thread::spawn(move || {
-            if let Err(e) = Self::run_listen_loop(self.sender) {
-                error!("热键监听错误: {}", e);
+            if let Err(e) = Self::run_listen_loop(self.sender, &hotkey) {
+                error!("Hotkey listener error: {}", e);
             }
         });
 
         Ok(())
     }
 
-    fn run_listen_loop(sender: Sender<HotkeyEvent>) -> Result<()> {
+    fn run_listen_loop(sender: Sender<HotkeyEvent>, hotkey: &str) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
-            return Self::run_listen_loop_macos(sender);
+            return Self::run_listen_loop_macos(sender, hotkey);
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            return Self::run_listen_loop_rdev(sender);
+            return Self::run_listen_loop_rdev(sender, hotkey);
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn run_listen_loop_macos(sender: Sender<HotkeyEvent>) -> Result<()> {
+    fn run_listen_loop_macos(sender: Sender<HotkeyEvent>, hotkey: &str) -> Result<()> {
         use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
         use core_graphics::event::{
-            CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventType, EventField,
-            KeyCode,
+            CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventType,
+            EventField, KeyCode,
         };
         use std::sync::atomic::{AtomicBool, AtomicU64};
 
+        let is_fn_key = hotkey == "fn";
         let pressed = Arc::new(AtomicBool::new(false));
         let pressed_clone = pressed.clone();
         let press_count = Arc::new(AtomicU64::new(0));
@@ -57,7 +60,12 @@ impl HotkeyListener {
         let pc = press_count.clone();
         let rc = release_count.clone();
 
-        println!("⌨️  热键监听器已启动（CGEventTap）");
+        let key_name = if is_fn_key {
+            "Fn"
+        } else {
+            "Right Command"
+        };
+        println!("⌨️  Hotkey listener started (CGEventTap, key: {})", key_name);
 
         let current = CFRunLoop::get_current();
         let tap = CGEventTap::new(
@@ -70,45 +78,72 @@ impl HotkeyListener {
                     return None;
                 }
 
-                let keycode =
-                    event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-                if keycode != KeyCode::RIGHT_COMMAND {
-                    return None;
-                }
+                if is_fn_key {
+                    // Fn key: detect via secondary Fn flag (0x800000)
+                    let flags = event.get_flags();
+                    let fn_down = (flags.bits() & 0x800000) != 0;
 
-                let is_pressed = event.get_flags().contains(CGEventFlags::CGEventFlagCommand);
-                if is_pressed {
-                    let was = pressed_clone.swap(true, Ordering::SeqCst);
-                    if !was {
-                        let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
-                        info!(
-                            "[Hotkey] 事件 #press={} 按下（右侧 Command）was_pressed={} -> 发送",
-                            n, was
-                        );
-                        if let Err(e) = sender.send(HotkeyEvent) {
-                            error!("发送热键事件失败: {}", e);
+                    if fn_down {
+                        let was = pressed_clone.swap(true, Ordering::SeqCst);
+                        if !was {
+                            let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+                            info!("[Hotkey] #{} pressed (Fn)", n);
+                            if let Err(e) = sender.send(HotkeyEvent::Pressed) {
+                                error!("Failed to send hotkey event: {}", e);
+                            }
+                        }
+                    } else if pressed_clone.load(Ordering::SeqCst) {
+                        // Only send Released if we previously sent Pressed
+                        pressed_clone.store(false, Ordering::SeqCst);
+                        let n = rc.fetch_add(1, Ordering::SeqCst) + 1;
+                        info!("[Hotkey] #{} released (Fn)", n);
+                        if let Err(e) = sender.send(HotkeyEvent::Released) {
+                            error!("Failed to send hotkey event: {}", e);
                         }
                     }
                 } else {
-                    let was = pressed_clone.swap(false, Ordering::SeqCst);
-                    if was {
-                        let n = rc.fetch_add(1, Ordering::SeqCst) + 1;
-                        info!(
-                            "[Hotkey] 事件 #release={} 松开（右侧 Command）was_pressed={}",
-                            n, was
-                        );
+                    // Right Command: filter by keycode first
+                    let keycode =
+                        event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+                    if keycode != KeyCode::RIGHT_COMMAND {
+                        return None;
+                    }
+                    let is_pressed = event.get_flags().contains(CGEventFlags::CGEventFlagCommand);
+
+                    if is_pressed {
+                        let was = pressed_clone.swap(true, Ordering::SeqCst);
+                        if !was {
+                            let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+                            info!("[Hotkey] #{} pressed (Right Cmd)", n);
+                            if let Err(e) = sender.send(HotkeyEvent::Pressed) {
+                                error!("Failed to send hotkey event: {}", e);
+                            }
+                        }
+                    } else {
+                        let was = pressed_clone.swap(false, Ordering::SeqCst);
+                        if was {
+                            let n = rc.fetch_add(1, Ordering::SeqCst) + 1;
+                            info!("[Hotkey] #{} released (Right Cmd)", n);
+                            if let Err(e) = sender.send(HotkeyEvent::Released) {
+                                error!("Failed to send hotkey event: {}", e);
+                            }
+                        }
                     }
                 }
 
                 None
             },
         )
-        .map_err(|_| anyhow::anyhow!("CGEventTap 创建失败，请确认已授予辅助功能和输入监控权限"))?;
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "CGEventTap creation failed, please verify Accessibility and Input Monitoring permissions are granted"
+            )
+        })?;
 
         let loop_source = tap
             .mach_port
             .create_runloop_source(0)
-            .map_err(|_| anyhow::anyhow!("无法创建 CGEventTap RunLoopSource"))?;
+            .map_err(|_| anyhow::anyhow!("Cannot create CGEventTap RunLoopSource"))?;
         unsafe {
             current.add_source(&loop_source, kCFRunLoopCommonModes);
         }
@@ -118,7 +153,7 @@ impl HotkeyListener {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn run_listen_loop_rdev(sender: Sender<HotkeyEvent>) -> Result<()> {
+    fn run_listen_loop_rdev(sender: Sender<HotkeyEvent>, _hotkey: &str) -> Result<()> {
         use rdev::{listen, Event, EventType, Key};
         use std::sync::atomic::{AtomicBool, AtomicU64};
 
@@ -129,38 +164,39 @@ impl HotkeyListener {
         let pc = press_count.clone();
         let rc = release_count.clone();
 
-        println!("⌨️  热键监听器已启动（rdev）");
+        println!("⌨️  Hotkey listener started (rdev)");
 
         let result = listen(move |event: Event| {
             match event.event_type {
                 EventType::KeyPress(Key::MetaRight) => {
-                    let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
                     let was = pressed_clone.swap(true, Ordering::SeqCst);
-                    info!(
-                        "[Hotkey] 事件 #press={} 按下（右侧 Command）was_pressed={} -> 发送",
-                        n, was
-                    );
-                    if let Err(e) = sender.send(HotkeyEvent) {
-                        error!("发送热键事件失败: {}", e);
+                    if !was {
+                        let n = pc.fetch_add(1, Ordering::SeqCst) + 1;
+                        info!("[Hotkey] event #press={} pressed", n);
+                        if let Err(e) = sender.send(HotkeyEvent::Pressed) {
+                            error!("Failed to send hotkey event: {}", e);
+                        }
                     }
                 }
                 EventType::KeyRelease(Key::MetaRight) => {
-                    let n = rc.fetch_add(1, Ordering::SeqCst) + 1;
                     let was = pressed_clone.swap(false, Ordering::SeqCst);
-                    info!(
-                        "[Hotkey] 事件 #release={} 松开（右侧 Command）was_pressed={}",
-                        n, was
-                    );
+                    if was {
+                        let n = rc.fetch_add(1, Ordering::SeqCst) + 1;
+                        info!("[Hotkey] event #release={} released", n);
+                        if let Err(e) = sender.send(HotkeyEvent::Released) {
+                            error!("Failed to send hotkey event: {}", e);
+                        }
+                    }
                 }
                 _ => {}
             }
         });
 
         if let Err(e) = result {
-            // rdev 在没有 Accessibility 权限时返回错误
+            // rdev returns error when Accessibility permission is missing
             anyhow::bail!(
-                "CGEventTap 启动失败: {:?}\n\
-                 请授权辅助功能权限：系统设置 > 隐私与安全性 > 辅助功能",
+                "CGEventTap start failed: {:?}\n\
+                 Please grant Accessibility permission: System Settings > Privacy & Security > Accessibility",
                 e
             );
         }
@@ -168,7 +204,7 @@ impl HotkeyListener {
     }
 }
 
-/// 检查是否已授予 Accessibility 权限（使用 macOS AXIsProcessTrusted）
+/// Check if Accessibility permission has been granted (using macOS AXIsProcessTrusted)
 pub fn check_accessibility_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -192,7 +228,7 @@ pub fn check_accessibility_permission() -> bool {
     }
 }
 
-/// 检查是否已授予 Input Monitoring 权限（macOS 监听全局键盘事件需要）
+/// Check if Input Monitoring permission has been granted (required for listening to global keyboard events on macOS)
 pub fn check_input_monitoring_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -209,32 +245,76 @@ pub fn check_input_monitoring_permission() -> bool {
     }
 }
 
-/// 提示用户手动授予 Accessibility 权限（不主动弹系统框）
+/// Request Accessibility permission — triggers macOS system dialog
 pub fn request_accessibility_permission() {
-    warn!("需要 Accessibility 权限才能监听全局热键");
-    println!("⚠️  需要 Accessibility 权限");
-    println!("请前往：系统设置 > 隐私与安全性 > 辅助功能");
-    println!("将 Open Flow.app 添加到列表并启用，然后完全退出后重新打开应用。");
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::base::TCFType;
+        use core_foundation::boolean::CFBoolean;
+        use core_foundation::dictionary::CFDictionary;
+        use core_foundation::string::CFString;
+
+        extern "C" {
+            fn AXIsProcessTrustedWithOptions(
+                options: core_foundation::dictionary::CFDictionaryRef,
+            ) -> bool;
+        }
+
+        // kAXTrustedCheckOptionPrompt = true → triggers the system permission dialog
+        let key = CFString::new("AXTrustedCheckOptionPrompt");
+        let val = CFBoolean::true_value();
+        let options = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), val.as_CFType())]);
+        unsafe {
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef());
+        }
+    }
+
+    warn!("Accessibility permission required to listen for global hotkeys");
+    println!("⚠️  Accessibility permission required");
+    println!("Please go to: System Settings > Privacy & Security > Accessibility");
+    println!("Add Open Flow.app to the list and enable it, then fully quit and reopen the app.");
 }
 
-/// 提示用户手动授予 Input Monitoring 权限（不主动弹系统框）
+/// Request Input Monitoring permission — triggers macOS system dialog
 pub fn request_input_monitoring_permission() {
-    warn!("需要 Input Monitoring 权限才能监听全局热键");
-    println!("⚠️  需要“输入监控”权限");
-    println!("请前往：系统设置 > 隐私与安全性 > 输入监控");
-    println!("将 Open Flow.app 添加到列表并启用，然后完全退出后重新打开应用。");
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "ApplicationServices", kind = "framework")]
+        unsafe extern "C" {
+            fn CGRequestListenEventAccess() -> bool;
+        }
+
+        unsafe {
+            CGRequestListenEventAccess();
+        }
+    }
+
+    warn!("Input Monitoring permission required to listen for global hotkeys");
+    println!("\u{26a0}\u{fe0f}  Input Monitoring permission required");
+    println!("Please go to: System Settings > Privacy & Security > Input Monitoring");
+    println!("Add Open Flow.app to the list and enable it, then fully quit and reopen the app.");
 }
 
-/// 检查麦克风权限状态。
-/// 返回 true 表示已授权（AVAuthorizationStatusAuthorized）。
-/// 未确定（0）时返回 false——首次运行需 NSMicrophoneUsageDescription 触发系统弹框。
+/// Request microphone permission.
+/// On macOS, the system dialog is triggered automatically by cpal when opening the audio device,
+/// as long as NSMicrophoneUsageDescription exists in Info.plist.
+/// For NotDetermined (first run), we just let cpal trigger the prompt on first recording.
+pub fn request_microphone_permission() {
+    info!("Microphone permission not yet granted. Dialog will appear on first recording attempt.");
+    println!("   Microphone dialog will appear when you first try to record.");
+    println!("   If it doesn't, go to: System Settings > Privacy & Security > Microphone");
+}
+
+/// Check microphone permission status.
+/// Returns true if authorized (AVAuthorizationStatusAuthorized).
+/// Returns false when undetermined (0) -- first run requires NSMicrophoneUsageDescription to trigger system dialog.
 pub fn check_microphone_permission() -> bool {
     #[cfg(target_os = "macos")]
     {
         use objc::{class, msg_send, sel, sel_impl};
         use objc::runtime::Object;
 
-        // 链接 AVFoundation 框架（仅需声明，不需要 extern fn）
+        // Link AVFoundation framework (only declaration needed, no extern fn)
         #[link(name = "AVFoundation", kind = "framework")]
         extern "C" {}
 
@@ -266,6 +346,6 @@ mod tests {
     #[test]
     fn test_check_permission() {
         let has_permission = check_accessibility_permission();
-        println!("Accessibility 权限状态: {}", has_permission);
+        println!("Accessibility permission status: {}", has_permission);
     }
 }
