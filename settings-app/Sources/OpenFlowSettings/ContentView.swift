@@ -139,9 +139,30 @@ struct ContentView: View {
                     }
                     .pickerStyle(.radioGroup)
 
-                    Text("Uses macOS native ICU transform. Applied to transcription output before pasting.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Typing Speed")
+                            .font(.callout.bold())
+
+                        HStack {
+                            Text("Chunk size")
+                            Spacer()
+                            Stepper("\(config.typingChunkSize) chars", value: $config.typingChunkSize, in: 1...50)
+                                .frame(width: 140)
+                        }
+
+                        HStack {
+                            Text("Delay")
+                            Spacer()
+                            Stepper("\(config.typingDelayMs) ms", value: $config.typingDelayMs, in: 0...200, step: 10)
+                                .frame(width: 140)
+                        }
+
+                        Text("Smaller chunks + longer delay = slower but avoids double typing. Default: 8 chars / 50ms")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 // Permissions section

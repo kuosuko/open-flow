@@ -12,6 +12,8 @@ class ConfigManager: ObservableObject {
     @Published var hotkey: String = "right_cmd"
     @Published var triggerMode: String = "toggle"
     @Published var chineseConversion: String = ""
+    @Published var typingChunkSize: Int = 8
+    @Published var typingDelayMs: Int = 50
     @Published var modelPath: String = ""
 
     // Daemon status
@@ -161,6 +163,8 @@ class ConfigManager: ObservableObject {
             case "hotkey": hotkey = value
             case "trigger_mode": triggerMode = value
             case "chinese_conversion": chineseConversion = value
+            case "typing_chunk_size": typingChunkSize = Int(value) ?? 8
+            case "typing_delay_ms": typingDelayMs = Int(value) ?? 10
             case "model_path": modelPath = value
             default: break
             }
@@ -185,6 +189,8 @@ class ConfigManager: ObservableObject {
             ("hotkey", hotkey),
             ("trigger_mode", triggerMode),
             ("chinese_conversion", chineseConversion),
+            ("typing_chunk_size", String(typingChunkSize)),
+            ("typing_delay_ms", String(typingDelayMs)),
         ]
 
         let ourKeys = Set(ourValues.map { $0.0 })

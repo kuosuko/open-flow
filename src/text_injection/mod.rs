@@ -7,6 +7,8 @@ use std::time::Duration;
 /// or clipboard paste fallback (other platforms).
 pub struct TextInjector {
     chinese_conversion: String,
+    typing_chunk_size: usize,
+    typing_delay_ms: u64,
 }
 
 impl TextInjector {
@@ -14,6 +16,8 @@ impl TextInjector {
         let config = crate::common::config::Config::load().unwrap_or_default();
         Self {
             chinese_conversion: config.chinese_conversion,
+            typing_chunk_size: config.typing_chunk_size.max(1) as usize,
+            typing_delay_ms: config.typing_delay_ms as u64,
         }
     }
 
@@ -27,13 +31,13 @@ impl TextInjector {
         }
 
         // 3. Type text (platform-specific)
-        Self::type_text(&text).await
+        self.type_text(&text).await
     }
 
     /// macOS: Use CGEvent keyboard events to simulate real typing.
     /// This is more consistent across apps than clipboard paste (Cmd+V).
     #[cfg(target_os = "macos")]
-    async fn type_text(text: &str) -> Result<()> {
+    async fn type_text(&self, text: &str) -> Result<()> {
         use std::ffi::c_void;
 
         #[link(name = "ApplicationServices", kind = "framework")]
@@ -82,14 +86,11 @@ impl TextInjector {
         let normalized = text.replace('\n', "\r");
         let utf16: Vec<u16> = normalized.encode_utf16().collect();
 
-        // Post in small chunks with a short delay between each for consistency
-        const CHUNK_SIZE: usize = 20;
-        const CHUNK_DELAY_MS: u64 = 5;
-
-        for chunk in utf16.chunks(CHUNK_SIZE) {
+        // Post in small chunks with delay between each for consistency
+        for chunk in utf16.chunks(self.typing_chunk_size) {
             post_unicode_chunk(chunk);
-            if CHUNK_DELAY_MS > 0 {
-                tokio::time::sleep(Duration::from_millis(CHUNK_DELAY_MS)).await;
+            if self.typing_delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(self.typing_delay_ms)).await;
             }
         }
 
@@ -97,7 +98,7 @@ impl TextInjector {
     }
 
     #[cfg(target_os = "linux")]
-    async fn type_text(_text: &str) -> Result<()> {
+    async fn type_text(&self, _text: &str) -> Result<()> {
         // Linux: fall back to clipboard paste via xdotool/wtype
         let xdotool = std::process::Command::new("xdotool")
             .args(["key", "--clearmodifiers", "ctrl+v"])
@@ -132,7 +133,7 @@ impl TextInjector {
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    async fn type_text(_text: &str) -> Result<()> {
+    async fn type_text(&self, _text: &str) -> Result<()> {
         tracing::warn!("Auto-type not supported on this platform. Text copied to clipboard — paste manually.");
         Ok(())
     }

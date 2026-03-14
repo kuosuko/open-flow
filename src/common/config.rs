@@ -31,8 +31,20 @@ pub struct Config {
     /// Convert simplified Chinese to traditional: "none", "s2t" (simplified→traditional), "t2s" (traditional→simplified)
     #[serde(default)]
     pub chinese_conversion: String,
+    /// Typing chunk size (UTF-16 chars per keystroke event). Smaller = more compatible. Default: 8
+    #[serde(default = "default_typing_chunk_size")]
+    pub typing_chunk_size: u32,
+    /// Delay between typing chunks in ms. Larger = avoids double input. Default: 10
+    #[serde(default = "default_typing_delay_ms")]
+    pub typing_delay_ms: u32,
 }
 
+fn default_typing_chunk_size() -> u32 {
+    8
+}
+fn default_typing_delay_ms() -> u32 {
+    50
+}
 fn default_provider() -> String {
     "local".into()
 }
@@ -57,6 +69,8 @@ impl Default for Config {
             hotkey: default_hotkey(),
             trigger_mode: default_trigger_mode(),
             chinese_conversion: String::new(),
+            typing_chunk_size: default_typing_chunk_size(),
+            typing_delay_ms: default_typing_delay_ms(),
         }
     }
 }
