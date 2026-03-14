@@ -273,8 +273,14 @@ pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
     // ── Exit cleanup ──────────────────────────────────────────────────────
     remove_pid_file();
 
+    // Kill the settings app if it's running (it's inside the .app bundle,
+    // keeping it alive prevents replacing the bundle)
+    let _ = std::process::Command::new("pkill")
+        .args(["-x", "OpenFlowSettings"])
+        .output();
+
     // Give the daemon thread a short time to exit gracefully
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
         if daemon_handle.is_finished() {
             break;
@@ -285,7 +291,6 @@ pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
     println!("\n👋 Open Flow stopped");
 
     // Force exit — the daemon thread may be blocked on tokio recv() or CFRunLoop
-    // and we don't want the process to hang
     std::process::exit(0);
 }
 
