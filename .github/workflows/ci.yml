@@ -1,0 +1,38 @@
+# Run cargo check on 3 platforms on every push to dev or PR to master
+# Purpose: catch compile errors early, before tagging a release
+name: CI
+
+on:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  check-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo check
+        run: cargo check
+
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo check
+        run: cargo check
+
+  check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxi-dev libxtst-dev libxdo-dev libglib2.0-dev libappindicator3-dev
+      - name: cargo check
+        run: cargo check

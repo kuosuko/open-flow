@@ -41,9 +41,11 @@ ringbuf = "0.3"
 # Cross-platform
 rdev = "0.5"
 arboard = "3"
+tray-icon = "0.21"
 
-# ASR - SenseVoice ONNX integration
-ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+# ASR - SenseVoice ONNX integration (half used for FP16 model output parsing)
+ort = { version = "2.0.0-rc.12", features = ["ndarray", "half"] }
+half = "2.4"
 ndarray = "0.17.2"
 rubato = "0.16"
 realfft = "3.4"
@@ -59,15 +61,18 @@ libc = "0.2"
 ctrlc = "3.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS 专用：菜单栏托盘、AppKit 集成
-tray-icon = "0.21"
+# macOS: menu bar tray, AppKit integration (tray-icon is in root dependencies)
 core-foundation = "0.9"
 core-graphics = "0.23"
 cocoa = "0.25"
 objc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Console"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux tray (tray-icon uses libappindicator) needs glib event loop on main thread
+glib = "0.19"
 
 [dev-dependencies]
 dirs = "5.0"

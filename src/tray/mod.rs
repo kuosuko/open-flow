@@ -1,4 +1,4 @@
-//! Tray icon: macOS has full implementation (menu bar tri-state), other platforms are no-op stubs.
+//! Tray icon: macOS menu bar, Windows/Linux system tray (tri-state + menu); other platforms are stubs.
 
 /// Tray state: idle / recording / transcribing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

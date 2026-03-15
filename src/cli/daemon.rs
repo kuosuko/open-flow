@@ -163,10 +163,22 @@ pub fn start_foreground(model: Option<PathBuf>) -> anyhow::Result<()> {
     let _ = fs::write(pid_path()?, my_pid.to_string());
 
     // ── Register Ctrl+C / signal handling -> set flag, main loop exits gracefully ─────────────────
-    // Using ctrlc for cross-platform support (Unix: SIGINT/SIGTERM; Windows: SetConsoleCtrlHandler)
-    let _ = ctrlc::set_handler(move || {
-        SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
-    });
+    #[cfg(not(windows))]
+    {
+        // Unix: SIGINT/SIGTERM
+        let _ = ctrlc::set_handler(move || {
+            SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
+        });
+    }
+    #[cfg(windows)]
+    {
+        // Windows: SetConsoleCtrlHandler must return TRUE(1) to indicate handled, otherwise process will be terminated by the system
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        unsafe {
+            let handler = Some(win32_ctrl_handler as _);
+            SetConsoleCtrlHandler(handler, 1i32); // 1 = TRUE = add handler
+        }
+    }
 
     // ── Initialize AppKit / NSApplication first, then create tray ────────────────────
     // tray-icon on macOS requires the main thread event loop to have started processing events before creating TrayIcon,
@@ -317,11 +329,23 @@ fn run_main_loop(
             }
         }
 
-        // Drive macOS NSRunLoop for 100ms (dispatch menu/tray events to callbacks)
+        // Drive platform event loop
         #[cfg(target_os = "macos")]
         pump_run_loop_100ms();
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            pump_glib_linux();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            pump_win32_messages();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Tray menu "Preferences..." -> launch SwiftUI settings app
@@ -411,6 +435,43 @@ fn pump_run_loop_100ms() {
             }
             let _: () = msg_send![app, sendEvent: event];
             let _: () = msg_send![app, updateWindows];
+        }
+    }
+}
+
+/// Linux: process glib main context so tray icon and menu can respond to clicks.
+#[cfg(target_os = "linux")]
+fn pump_glib_linux() {
+    let ctx = glib::MainContext::default();
+    while ctx.iteration(false) {}
+}
+
+/// Windows: Ctrl+C/Ctrl+Break console handler; returns 1(TRUE) to indicate handled, preventing system default process termination.
+#[cfg(windows)]
+unsafe extern "system" fn win32_ctrl_handler(dw_ctrl_type: u32) -> i32 {
+    if dw_ctrl_type == 0 /* CTRL_C_EVENT */ || dw_ctrl_type == 1 /* CTRL_BREAK_EVENT */ {
+        SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
+        1i32 // TRUE: handled, don't call next handler or ExitProcess
+    } else {
+        0i32 // FALSE: not handled, pass to other handlers
+    }
+}
+
+/// Windows: process current thread message queue so tray icon and menu can respond to clicks.
+#[cfg(target_os = "windows")]
+fn pump_win32_messages() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
+    };
+
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    while unsafe { PeekMessageW(&mut msg, 0, 0, 0, PM_REMOVE) } != 0 {
+        if msg.message == WM_QUIT {
+            break;
+        }
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
     }
 }

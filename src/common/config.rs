@@ -7,9 +7,43 @@ use tracing::info;
 
 const CONFIG_FILE: &str = "config.toml";
 
+/// Model preset: only supports quantized (default) and fp16
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelPreset {
+    /// HuggingFace quantized version (~200MB), default
+    #[default]
+    Quantized,
+    /// FP16 half-precision (~450MB), higher accuracy, requires manual switch
+    Fp16,
+}
+
+impl ModelPreset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelPreset::Quantized => "quantized",
+            ModelPreset::Fp16 => "fp16",
+        }
+    }
+}
+
+impl std::str::FromStr for ModelPreset {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim().to_lowercase();
+        match s.as_str() {
+            "quantized" | "quant" => Ok(ModelPreset::Quantized),
+            "fp16" | "medium" => Ok(ModelPreset::Fp16),
+            _ => Err(format!("Unknown preset: {}. Options: quantized, fp16", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub model_path: Option<PathBuf>,
+    /// Model preset: quantized (default) | fp16. Serialized as string in config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preset: Option<String>,
     /// "local" or "groq"
     #[serde(default = "default_provider")]
     pub provider: String,
@@ -58,10 +92,21 @@ fn default_trigger_mode() -> String {
     "toggle".into()
 }
 
+impl Config {
+    /// Currently effective model preset (defaults to quantized if not set in config)
+    pub fn effective_preset(&self) -> ModelPreset {
+        self.model_preset
+            .as_deref()
+            .and_then(|s| s.trim().to_lowercase().parse().ok())
+            .unwrap_or_default()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             model_path: None,
+            model_preset: None,
             provider: default_provider(),
             groq_api_key: String::new(),
             groq_model: default_groq_model(),
@@ -137,5 +182,11 @@ impl Config {
         fs::create_dir_all(data_dir)?;
 
         Ok(data_dir.to_path_buf())
+    }
+
+    /// Set model preset and write back to config
+    pub fn set_model_preset(&mut self, preset: ModelPreset) -> Result<()> {
+        self.model_preset = Some(preset.as_str().to_string());
+        self.save()
     }
 }

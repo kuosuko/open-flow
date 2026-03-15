@@ -72,7 +72,8 @@ mod platform {
                 let content_frame: NSRect = msg_send![content_view, bounds];
                 let effect_view: *mut Object =
                     msg_send![effect_view, initWithFrame: content_frame];
-                let _: () = msg_send![effect_view, setMaterial: 13i64]; // HUDWindow
+                // Popover material adapts to light/dark mode
+                let _: () = msg_send![effect_view, setMaterial: 3i64];
                 let _: () = msg_send![effect_view, setBlendingMode: 0i64]; // behindWindow
                 let _: () = msg_send![effect_view, setState: 1i64]; // active
                 let _: () = msg_send![effect_view, setWantsLayer: YES];
@@ -118,9 +119,9 @@ mod platform {
                 let _: () = msg_send![text_field, setEditable: NO];
                 let _: () = msg_send![text_field, setSelectable: NO];
 
-                let white_alpha: *mut Object = msg_send![class!(NSColor),
-                    colorWithWhite: 1.0f64 alpha: 0.9f64];
-                let _: () = msg_send![text_field, setTextColor: white_alpha];
+                // labelColor adapts to light/dark mode automatically
+                let label_color: *mut Object = msg_send![class!(NSColor), labelColor];
+                let _: () = msg_send![text_field, setTextColor: label_color];
 
                 let font: *mut Object = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
                 let _: () = msg_send![text_field, setFont: font];

@@ -137,6 +137,12 @@ enum Commands {
         ready_wait_secs: u64,
     },
 
+    /// Switch or list model preset (quantized default | fp16), missing models will be auto-downloaded
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
+
     /// Manually download the ASR model (auto-triggered on first run, manual execution not needed)
     #[command(hide = true)]
     Setup {
@@ -148,6 +154,20 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ModelCommand {
+    /// Switch to a specified preset; if the preset's model directory is missing, auto-download
+    Use {
+        /// Preset: quantized (default) | fp16
+        preset: String,
+        /// Force check/download after switching
+        #[arg(long)]
+        download: bool,
+    },
+    /// List current and available presets
+    List,
 }
 
 /// `open-flow start` defaults to background; `--foreground` uses foreground path (main thread reserved for macOS tray/NSRunLoop)
@@ -229,6 +249,15 @@ async fn async_main(cmd: Commands) -> anyhow::Result<()> {
             )
             .await?;
         }
+        Commands::Model { command } => match command {
+            ModelCommand::Use { preset, download } => {
+                let p = preset.parse().map_err(|e: String| anyhow::anyhow!("{}", e))?;
+                commands::model::use_preset(p, download).await?;
+            }
+            ModelCommand::List => {
+                commands::model::list()?;
+            }
+        },
         Commands::Setup { model_dir, force } => {
             commands::setup::run(model_dir, force).await?;
         }
