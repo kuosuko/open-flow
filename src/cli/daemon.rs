@@ -316,6 +316,16 @@ fn run_main_loop(
     daemon_alive: &AtomicBool,
 ) {
     loop {
+        // Autorelease pool: every ObjC call in this loop creates autoreleased objects
+        // (NSEvent, NSString, etc). Without draining, they accumulate forever → memory leak.
+        #[cfg(target_os = "macos")]
+        let _pool = unsafe {
+            use objc::{class, msg_send, sel, sel_impl};
+            let pool: *mut objc::runtime::Object =
+                msg_send![class!(NSAutoreleasePool), new];
+            pool
+        };
+
         // Apply tray state updates from daemon (gray/red/yellow)
         if let Some(t) = tray {
             t.flush_state_updates();
@@ -357,19 +367,28 @@ fn run_main_loop(
             }
         }
 
-        // Tray menu "Exit"
-        if tray.map_or(false, |t| t.exit_requested()) {
+        // Check exit conditions
+        let should_exit = if tray.map_or(false, |t| t.exit_requested()) {
             tracing::info!("User clicked tray exit");
-            break;
-        }
-        // SIGTERM / SIGINT (open-flow stop or Ctrl+C)
-        if SIGNAL_SHUTDOWN.load(Ordering::SeqCst) {
+            true
+        } else if SIGNAL_SHUTDOWN.load(Ordering::SeqCst) {
             tracing::info!("Signal received, exiting gracefully");
-            break;
-        }
-        // Daemon thread exited unexpectedly
-        if !daemon_alive.load(Ordering::SeqCst) {
+            true
+        } else if !daemon_alive.load(Ordering::SeqCst) {
             tracing::error!("Daemon thread has exited unexpectedly");
+            true
+        } else {
+            false
+        };
+
+        // Drain autorelease pool — MUST happen every iteration to prevent memory leak
+        #[cfg(target_os = "macos")]
+        unsafe {
+            use objc::{msg_send, sel, sel_impl};
+            let _: () = msg_send![_pool, drain];
+        }
+
+        if should_exit {
             break;
         }
     }
